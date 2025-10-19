@@ -1,3 +1,45 @@
+/**
+ * @typedef {Object} ServerInfo
+ * @property {string} ip - Server IP address
+ * @property {number} port - Server port number
+ * @property {string} map - Current map name
+ * @property {string} status - Server status
+ * @property {number} players - Current player count
+ * @property {number} maxPlayers - Maximum player capacity
+ */
+
+/**
+ * @typedef {Object} TrackyData
+ * @property {string[]} names - List of player names
+ * @property {number} updatedAtMs - Last update timestamp in milliseconds
+ * @property {string} source - Data source identifier
+ */
+
+/**
+ * @typedef {Object} GameTrackerData
+ * @property {string[]} names - List of player names
+ * @property {number} updatedAtMs - Last update timestamp in milliseconds
+ * @property {string} map - Current map name
+ * @property {string} source - Data source identifier
+ */
+
+/**
+ * Validates the configuration object
+ * @param {Object} C - Configuration object
+ * @throws {Error} If any required fields are missing or invalid
+ */
+function validateConfig_(C) {
+  const required = ['SERVER_IP', 'SERVER_PORT', 'BACTA', 'DOCTOR'];
+  for (const key of required) {
+    if (!C[key]) throw new Error(`Missing required config: ${key}`);
+  }
+  if (!isFinite(C.MAX_PLAYERS_CAP) || C.MAX_PLAYERS_CAP < 1) {
+    throw new Error('Invalid MAX_PLAYERS_CAP');
+  }
+  if (!C.TZ) throw new Error('Missing timezone configuration');
+  if (!C.TS_FMT) throw new Error('Missing timestamp format configuration');
+}
+
 function updateServerSheets() {
   const C = {
     // ---- YOUR SERVER (exact match for BM) ----
@@ -64,6 +106,14 @@ function updateServerSheets() {
   const nowMs = now.getTime();
   Logger.log("=== run start ===");
 
+  // Validate configuration
+  try {
+    validateConfig_(C);
+  } catch (e) {
+    Logger.log("Configuration error: " + e.message);
+    throw e;
+  }
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const bacta  = ss.getSheetByName(C.BACTA);
   const doctor = ss.getSheetByName(C.DOCTOR);
@@ -85,9 +135,7 @@ function updateServerSheets() {
 
   // Tracky API
   try {
-    const r = UrlFetchApp.fetch(C.TS_WIDGET, req_(C.UA, C.TIMEOUT_MS));
-    if (r.getResponseCode() !== 200) throw new Error("Tracky API HTTP " + r.getResponseCode());
-    const j = JSON.parse(r.getContentText() || "{}");
+    const j = getCachedResponse_(C.TS_WIDGET, req_(C.UA, C.TIMEOUT_MS), 1); // 1 minute cache
     tk.names = unique_(parseTrackyJSON_(j).map(clean_).filter(valid_)).slice(0, C.MAX_PLAYERS);
     tk.updatedAtMs = nowMs;
     Logger.log("Tracky names: %d", tk.names.length);
@@ -95,12 +143,12 @@ function updateServerSheets() {
     Logger.log("Tracky API fail: %s", e);
   }
 
-  // GameTracker (also parse its map + “last scanned” freshness)
+  // GameTracker (also parse its map + "last scanned" freshness)
   let gtHtml = "";
   try {
-    const r = UrlFetchApp.fetch(C.GT_URL, req_(C.UA, C.TIMEOUT_MS));
-    if (r.getResponseCode() !== 200) throw new Error("GT HTTP " + r.getResponseCode());
-    gtHtml = r.getContentText() || "";
+    const response = rateLimitedFetch_(C.GT_URL, req_(C.UA, C.TIMEOUT_MS));
+    if (response.getResponseCode() !== 200) throw new Error("GT HTTP " + response.getResponseCode());
+    gtHtml = response.getContentText() || "";
     const p = parseGT_(gtHtml);
     gt.names = unique_(p.names.map(clean_).filter(valid_)).slice(0, C.MAX_PLAYERS);
     gt.updatedAtMs = p.updatedAtMs || 0;
@@ -428,7 +476,7 @@ function parseGT_(html) {
 
 /* ---------- BM exact match ---------- */
 function fetchBMExact_(url, ua, wantIp, wantPort) {
-  const r = UrlFetchApp.fetch(url, req_(ua, 15000));
+  const r = rateLimitedFetch_(url, req_(ua, 15000));
   if (r.getResponseCode() !== 200) throw new Error("BM HTTP " + r.getResponseCode());
   const j = JSON.parse(r.getContentText() || "{}");
   const list = Array.isArray(j.data) ? j.data : [];
@@ -451,6 +499,51 @@ function fetchBMExact_(url, ua, wantIp, wantPort) {
 }
 
 /* ---------- utils ---------- */
+/**
+ * Rate-limited fetch with retries
+ * @param {string} url - URL to fetch
+ * @param {Object} options - Fetch options
+ * @param {number} maxRetries - Maximum number of retries
+ * @param {number} delayMs - Delay between retries in milliseconds
+ * @returns {GoogleAppsScript.URL_Fetch.HTTPResponse}
+ */
+function rateLimitedFetch_(url, options, maxRetries = 3, delayMs = 1000) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const response = UrlFetchApp.fetch(url, options);
+      if (response.getResponseCode() === 429) { // Too Many Requests
+        Utilities.sleep(delayMs * (i + 1));
+        continue;
+      }
+      return response;
+    } catch (e) {
+      if (i === maxRetries - 1) throw e;
+      Utilities.sleep(delayMs * (i + 1));
+    }
+  }
+}
+
+/**
+ * Fetch with caching
+ * @param {string} url - URL to fetch
+ * @param {Object} options - Fetch options
+ * @param {number} cacheMinutes - Cache duration in minutes
+ * @returns {Object} Parsed response data
+ */
+function getCachedResponse_(url, options, cacheMinutes = 5) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = Utilities.base64Encode(url);
+  const cached = cache.get(cacheKey);
+  
+  if (cached) return JSON.parse(cached);
+  
+  const response = rateLimitedFetch_(url, options);
+  const data = response.getContentText();
+  cache.put(cacheKey, data, cacheMinutes * 60);
+  
+  return JSON.parse(data);
+}
+
 function req_(ua, timeout) {
   return { muteHttpExceptions: true, followRedirects: true, headers: { "User-Agent": ua, "Accept-Language": "en-AU,en;q=0.8" }, method: "get", timeout: timeout };
 }
