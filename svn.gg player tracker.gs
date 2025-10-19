@@ -257,21 +257,21 @@ const ApiService = {
   },
 
   _extractPlayerRows: function(block) {
-    const rows = block.match(/<tr[\\s\\S]*?<\\/tr>/gi) || [];
-    return rows.filter(row => !/>\\s*Rank\\s*</i.test(row));
+    const rows = block.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+    return rows.filter(row => !/>\s*Rank\s*</i.test(row));
   },
 
   _extractPlayerName: function(row) {
-    const cells = row.match(/<td[\\s\\S]*?<\\/td>/gi) || [];
+    const cells = row.match(/<td[\s\S]*?<\/td>/gi) || [];
     if (cells.length < 2) return '';
     
     const nameCell = cells[1];
-    const nameMatch = nameCell.match(/<a[^>]*>([\\s\\S]*?)<\\/a>/i);
+    const nameMatch = nameCell.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
     return DataValidator.sanitizeText(nameMatch ? nameMatch[1] : this._stripTags(nameCell));
   },
 
   _stripTags: function(html) {
-    return (html || '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();
+    return (html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   },
 };
 
